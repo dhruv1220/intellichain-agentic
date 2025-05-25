@@ -36,5 +36,9 @@ def top_delayed_products(n: int = 5) -> list:
     )
     return grouped.to_dict()
 
+@mcp.tool()
+def avg_delay_by_shipping_mode() -> dict:
+    return df.groupby("Shipping Mode")["Delivery_Delay_Days"].mean().round(2).to_dict()
+
 if __name__ == "__main__":
     mcp.run(transport="stdio")
