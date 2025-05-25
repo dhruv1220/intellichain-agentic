@@ -2,6 +2,11 @@ from flask import Flask, request, jsonify
 import asyncio
 from client.openai_client import MCPOpenAIClient
 
+import os
+import uuid
+from datetime import datetime
+import json
+
 app = Flask(__name__)
 client = MCPOpenAIClient()
 loop = asyncio.new_event_loop()
@@ -22,10 +27,32 @@ def analyze_image_route():
     if "image" not in request.files or "question" not in request.form:
         return jsonify({"error": "Missing 'image' or 'question'"}), 400
 
-    image = request.files["image"].read()
+    image_file = request.files["image"]
     question = request.form["question"]
-    response = loop.run_until_complete(client.analyze_image(image, question))
-    return jsonify({"response": response})
+    image_bytes = image_file.read()
+
+    # Save image locally
+    image_id = str(uuid.uuid4())
+    image_ext = os.path.splitext(image_file.filename)[-1]
+    image_path = f"logs/{image_id}{image_ext}"
+    with open(image_path, "wb") as f:
+        f.write(image_bytes)
+
+    # Call GPT-4o
+    response_text = loop.run_until_complete(client.analyze_image(image_bytes, question))
+
+    # Log metadata
+    log = {
+        "timestamp": datetime.now().isoformat(),
+        "question": question,
+        "image_path": image_path,
+        "response": response_text,
+    }
+
+    with open("logs/image_logs.jsonl", "a") as f:
+        f.write(json.dumps(log) + "\n")
+
+    return jsonify({"response": response_text})
 
 if __name__ == "__main__":
     loop.run_until_complete(client.connect_to_server("server/supply_data_server.py"))
