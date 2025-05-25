@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify
 import asyncio
 from client.openai_client import MCPOpenAIClient
+from router.router import call_agent
 
 import os
 import uuid
@@ -53,6 +54,15 @@ def analyze_image_route():
         f.write(json.dumps(log) + "\n")
 
     return jsonify({"response": response_text})
+
+@app.route("/multi-agent", methods=["POST"])
+def multi_agent_route():
+    data = request.get_json()
+    if "query" not in data:
+        return jsonify({"error": "Missing query"}), 400
+
+    result = loop.run_until_complete(call_agent(data["query"]))
+    return jsonify({"response": result})
 
 if __name__ == "__main__":
     loop.run_until_complete(client.connect_to_server("server/supply_data_server.py"))
