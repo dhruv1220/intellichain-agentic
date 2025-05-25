@@ -1,0 +1,6 @@
+{
+  "name": "DelayStatsAgent",
+  "description": "Provides delivery delay statistics and shipping mode breakdowns",
+  "endpoint": "python",
+  "args": ["server/supply_data_server.py"]
+}
