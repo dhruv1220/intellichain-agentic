@@ -17,6 +17,16 @@ def ask():
 def hello():
     return "MCP + OpenAI Supply Chain Assistant is live."
 
+@app.route("/analyze-image", methods=["POST"])
+def analyze_image_route():
+    if "image" not in request.files or "question" not in request.form:
+        return jsonify({"error": "Missing 'image' or 'question'"}), 400
+
+    image = request.files["image"].read()
+    question = request.form["question"]
+    response = loop.run_until_complete(client.analyze_image(image, question))
+    return jsonify({"response": response})
+
 if __name__ == "__main__":
     loop.run_until_complete(client.connect_to_server("server/supply_data_server.py"))
     app.run(port=5001)

@@ -10,6 +10,10 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from openai import AsyncAzureOpenAI  # For Azure OpenAI
 
+import base64
+from typing import Union
+from openai.types.chat import ChatCompletionMessageParam
+
 nest_asyncio.apply()
 load_dotenv()
 
@@ -86,3 +90,30 @@ class MCPOpenAIClient:
 
     async def cleanup(self):
         await self.exit_stack.aclose()
+    
+    async def analyze_image(self, image_bytes: bytes, question: str) -> str:
+        base64_image = base64.b64encode(image_bytes).decode("utf-8")
+
+        messages: List[ChatCompletionMessageParam] = [
+            {"role": "system", "content": "You are a supply chain expert."},
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/png;base64,{base64_image}",
+                            "detail": "high",
+                        },
+                    },
+                    {"type": "text", "text": question},
+                ],
+            },
+        ]
+
+        response = await self.openai_client.chat.completions.create(
+            model=self.deployment,
+            messages=messages,
+        )
+
+        return response.choices[0].message.content
