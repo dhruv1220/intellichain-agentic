@@ -1,0 +1,6 @@
+{
+  "name": "InventoryAgent",
+  "description": "Handles inventory insights and restocking recommendations",
+  "endpoint": "python",
+  "args": ["server/inventory_agent_server.py"]
+}
