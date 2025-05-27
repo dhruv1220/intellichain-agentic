@@ -66,5 +66,8 @@ def multi_agent():
     })
 
 if __name__ == "__main__":
-    loop.run_until_complete(client.connect_to_server("server/supply_data_server.py"))
+    loop.run_until_complete(client.connect_to_servers({
+        "SupplyChainServer": "server/supply_data_server.py",
+        "ForecastAgent": "server/forecast_agent_server.py"
+    }))
     app.run(port=5001)

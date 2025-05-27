@@ -33,7 +33,7 @@ def log_tool_usage(tool_name: str, arguments: Dict, response: str, user_query: s
 class MCPOpenAIClient:
     def __init__(self):
         self.exit_stack = AsyncExitStack()
-        self.session: Optional[ClientSession] = None
+        self.sessions = {}  # key: server name, value: (session, tool names)
 
         # Azure OpenAI configuration
         self.api_key = os.getenv("AZURE_OPENAI_API_KEY")
@@ -47,32 +47,37 @@ class MCPOpenAIClient:
             azure_endpoint=self.endpoint,
         )
 
-    async def connect_to_server(self, server_script_path: str = "server/supply_data_server.py"):
-        server_params = StdioServerParameters(command="python", args=[server_script_path])
-        stdio_transport = await self.exit_stack.enter_async_context(stdio_client(server_params))
-        self.stdio, self.write = stdio_transport
-        self.session = await self.exit_stack.enter_async_context(ClientSession(self.stdio, self.write))
-        await self.session.initialize()
-
-        # Log available tools
-        tools_result = await self.session.list_tools()
-        print("\nConnected to MCP server with tools:")
-        for tool in tools_result.tools:
-            print(f"- {tool.name}: {tool.description}")
+    async def connect_to_servers(self, server_map: Dict[str, str]):
+        """
+        server_map = {
+            "SupplyChainServer": "server/supply_data_server.py",
+            "ForecastAgent": "server/forecast_agent_server.py"
+        }
+        """
+        for server_name, path in server_map.items():
+            params = StdioServerParameters(command="python", args=[path])
+            stdio_transport = await self.exit_stack.enter_async_context(stdio_client(params))
+            read, write = stdio_transport
+            session = await self.exit_stack.enter_async_context(ClientSession(read, write))
+            await session.initialize()
+            tools_result = await session.list_tools()
+            tool_names = [tool.name for tool in tools_result.tools]
+            self.sessions[server_name] = (session, tool_names)
 
     async def get_mcp_tools(self) -> List[Dict[str, Any]]:
-        tools_result = await self.session.list_tools()
-        return [
-            {
-                "type": "function",
-                "function": {
-                    "name": tool.name,
-                    "description": tool.description,
-                    "parameters": tool.inputSchema,
-                },
-            }
-            for tool in tools_result.tools
-        ]
+        all_tools = []
+        for session, _ in self.sessions.values():
+            tools_result = await session.list_tools()
+            for tool in tools_result.tools:
+                all_tools.append({
+                    "type": "function",
+                    "function": {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": tool.inputSchema,
+                    },
+                })
+        return all_tools
 
     async def process_query(self, query: str) -> str:
         tools = await self.get_mcp_tools()
@@ -95,8 +100,19 @@ class MCPOpenAIClient:
                 tool_name = tool_call.function.name
                 tool_args = json.loads(tool_call.function.arguments)
 
-                # Execute MCP tool
-                result = await self.session.call_tool(tool_name, arguments=tool_args)
+                # Determine which session owns the tool
+                session = None
+                for _, (sess, tool_names) in self.sessions.items():
+                    if tool_name in tool_names:
+                        session = sess
+                        break
+
+                if session is None:
+                    raise ValueError(f"Tool '{tool_name}' not found in any connected MCP server")
+
+                result = await session.call_tool(
+                    tool_name, arguments=tool_args
+                )
 
                 tool_output = result.content[0].text if result.content else "⚠️ Tool returned no output"
 
@@ -113,7 +129,7 @@ class MCPOpenAIClient:
                     "tool_call_id": tool_call.id,
                     "content": tool_output,
                 })
-
+        
             # Final GPT response incorporating tool results
             final_response = await self.openai_client.chat.completions.create(
                 messages=messages,
