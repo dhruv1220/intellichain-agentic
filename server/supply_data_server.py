@@ -40,5 +40,29 @@ def top_delayed_products(n: int = 5) -> list:
 def avg_delay_by_shipping_mode() -> dict:
     return df.groupby("Shipping Mode")["Delivery_Delay_Days"].mean().round(2).to_dict()
 
+@mcp.tool()
+def recommend_shipping_method(region: str) -> str:
+    """
+    Based on average delivery delays per shipping mode in `region`,
+    recommend the fastest / most reliable mode.
+    """
+    df_region = df[df["Order Region"].str.lower()==region.lower()]
+    if df_region.empty:
+        return f"No data for region: {region}"
+
+    # compute average delay by shipping mode
+    stats = (
+        df_region
+        .groupby("Shipping Mode")["Delivery_Delay_Days"]
+        .mean()
+        .sort_values()
+    )
+    best_mode = stats.index[0]
+    avg_delay = stats.iloc[0]
+    return (
+        f"In {region}, the fastest shipping mode on average is '{best_mode}' "
+        f"with mean delay {avg_delay:.2f} days."
+    )
+
 if __name__ == "__main__":
     mcp.run(transport="stdio")
