@@ -2,5 +2,9 @@
   "name": "ForecastAgent",
   "description": "Predicts demand trends based on historical order data",
   "endpoint": "python",
-  "args": ["server/forecast_agent_server.py"]
+  "args": ["server/forecast_agent_server.py"],
+  "tools": [
+    "forecast_demand",
+    "total_sales_by_region"
+  ]
 }

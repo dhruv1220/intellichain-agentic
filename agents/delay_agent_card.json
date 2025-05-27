@@ -2,5 +2,11 @@
   "name": "DelayStatsAgent",
   "description": "Provides delivery delay statistics and shipping mode breakdowns",
   "endpoint": "python",
-  "args": ["server/supply_data_server.py"]
+  "args": ["server/supply_data_server.py"],
+  "tools": [
+    "get_delay_stats",
+    "query_orders_by_region",
+    "get_shipping_mode_breakdown",
+    "top_delayed_products"
+  ]
 }
