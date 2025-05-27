@@ -35,5 +35,64 @@ def restock_suggestion(region: str) -> list:
     top_products.columns = ["Product", "TimesOrdered"]
     return top_products.to_dict(orient="records")
 
+@mcp.tool()
+def products_at_risk_of_stockout(min_orders: int = 5) -> list:
+    """
+    Identify products that are frequently ordered but have stock issues.
+
+    Args:
+        min_orders: Minimum number of orders in past month to be considered.
+
+    Returns:
+        List of product names with high demand and low availability.
+    """
+    # Use Product Status: 1 = Not Available, 0 = Available
+    stock_status = df[df["Product Status"] == 1]
+    
+    recent_orders = df[
+        pd.to_datetime(df["order date (DateOrders)"], errors="coerce") >= pd.Timestamp.now() - pd.Timedelta(days=30)
+    ]
+
+    high_demand = (
+        recent_orders.groupby("Product Name")
+        .size()
+        .reset_index(name="recent_orders")
+        .query("recent_orders >= @min_orders")
+    )
+
+    at_risk = stock_status[stock_status["Product Name"].isin(high_demand["Product Name"])]
+    return at_risk["Product Name"].drop_duplicates().tolist()
+
+@mcp.tool()
+def demand_supply_gap(top_n: int = 5) -> list:
+    """
+    Show products with the biggest demand/supply mismatch.
+
+    Returns:
+        List of products sorted by descending demand-supply gap.
+    """
+    demand = df.groupby("Product Name")["Order Item Quantity"].sum()
+    availability = (
+        df[df["Product Status"] == 0]
+        .groupby("Product Name")["Order Item Quantity"]
+        .sum()
+    )
+
+    mismatch = (demand - availability).dropna().sort_values(ascending=False).head(top_n)
+    
+    return [{"Product": name, "Gap": int(gap)} for name, gap in mismatch.items()]
+
+@mcp.tool()
+def product_status_overview() -> dict:
+    """
+    Returns total available vs. unavailable products in inventory.
+    """
+    counts = df["Product Status"].value_counts().to_dict()
+    return {
+        "Available Products": counts.get(0, 0),
+        "Unavailable Products": counts.get(1, 0)
+    }
+
+
 if __name__ == "__main__":
     mcp.run(transport="stdio")

@@ -1,6 +1,13 @@
 {
   "name": "InventoryAgent",
-  "description": "Handles inventory insights and restocking recommendations",
+  "description": "Manages product availability and identifies at-risk inventory based on live data",
   "endpoint": "python",
-  "args": ["server/inventory_agent_server.py"]
+  "args": ["server/inventory_agent_server.py"],
+  "tools": [
+    "low_stock_products",
+    "restock_suggestion",
+    "products_at_risk_of_stockout",
+    "demand_supply_gap",
+    "product_status_overview"
+  ]
 }
