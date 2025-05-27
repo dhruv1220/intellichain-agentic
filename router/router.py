@@ -10,15 +10,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-REGION_MAP = {
-    "asia pacific": ["Southeast Asia", "South Asia", "Eastern Asia"],
-    "europe": ["Europe"],
-    "north america": ["North America"],
-    "south america": ["South America"],
-    "oceania": ["Oceania"],
-    "africa": ["Africa"]
-}
-
 GPT = AsyncAzureOpenAI(
     api_key=os.getenv("AZURE_OPENAI_API_KEY"),
     api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
@@ -31,7 +22,7 @@ def load_agent_cards():
     cards = {}
     for fname in os.listdir("agents"):
         if fname.endswith(".json"):
-            with open(f"agents/{fname}") as f:
+            with open(f"agents/" + fname) as f:
                 card = json.load(f)
                 cards[card["name"]] = card
     return cards
@@ -39,10 +30,13 @@ def load_agent_cards():
 async def call_agent(query: str):
     agent_cards = load_agent_cards()
     trace_log = []
+    tool_to_agent = {}
+    agent_descriptions = {}
 
-    # Step 1: Initialize with GPT
+    # Step 1: Discover tools and build tool-agent map
     tools = []
     for agent in agent_cards.values():
+        agent_descriptions[agent["name"]] = agent["description"]
         server_params = StdioServerParameters(command=agent["endpoint"], args=agent["args"])
         async with AsyncExitStack() as stack:
             read, write = await stack.enter_async_context(stdio_client(server_params))
@@ -50,6 +44,7 @@ async def call_agent(query: str):
             await session.initialize()
             tools_result = await session.list_tools()
             for tool in tools_result.tools:
+                tool_to_agent[tool.name] = agent
                 tools.append({
                     "type": "function",
                     "function": {
@@ -59,21 +54,37 @@ async def call_agent(query: str):
                     }
                 })
 
-    # Step 2: GPT selects tools & arguments
+    # Step 2: System message to describe available agents and domains
+    agent_guide = "\n".join([
+        f"- {name}: {desc}" for name, desc in agent_descriptions.items()
+    ])
+    system_prompt = (
+        "You are a multi-agent AI assistant.\n"
+        "Available agents and their specialties:\n"
+        f"{agent_guide}\n\n"
+        "Use tools from the most relevant agent(s) to help answer the user's query."
+    )
+
+    # Step 3: Ask GPT to pick tools
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": query}
+    ]
+
     initial_response = await GPT.chat.completions.create(
         model=MODEL,
-        messages=[{"role": "user", "content": query}],
+        messages=messages,
         tools=tools,
         tool_choice="auto"
     )
 
     assistant_msg = initial_response.choices[0].message
-    messages = [{"role": "user", "content": query}, assistant_msg]
+    messages.append(assistant_msg)
 
     if not assistant_msg.tool_calls:
         return {"response": assistant_msg.content, "trace": []}
 
-    # Step 3: Execute tool calls
+    # Step 4: Execute tool calls and add result back to GPT
     for tool_call in assistant_msg.tool_calls:
         tool_name = tool_call.function.name
         arguments = json.loads(tool_call.function.arguments)
@@ -81,46 +92,44 @@ async def call_agent(query: str):
         trace_entry = {
             "step": len(trace_log) + 1,
             "tool": tool_name,
-            "args": arguments,
+            "args": arguments, 
             "start": time.time()
         }
 
-        # Find which agent has this tool
-        target_card = None
-        for card in agent_cards.values():
-            if tool_name in card["tools"]:
-                target_card = card
-                break
-
-        if not target_card:
-            trace_entry["error"] = f"Tool '{tool_name}' not found in agent registry"
+        agent_card = tool_to_agent.get(tool_name)
+        if not agent_card:
+            trace_entry["error"] = f"Tool '{tool_name}' not found in any agent"
             trace_log.append(trace_entry)
             continue
 
-        # Connect and call tool
         server_params = StdioServerParameters(
-            command=target_card["endpoint"], args=target_card["args"]
+            command=agent_card["endpoint"],
+            args=agent_card["args"]
         )
+
+        # Adding Agent Name to Trace Entry
+        trace_entry["agent"] = agent_card["name"] 
+
         async with AsyncExitStack() as stack:
             read, write = await stack.enter_async_context(stdio_client(server_params))
             session = await stack.enter_async_context(ClientSession(read, write))
             await session.initialize()
             result = await session.call_tool(tool_name, arguments=arguments)
 
+        tool_output = result.content[0].text if result.content else "⚠️ No output"
         trace_entry["end"] = time.time()
         trace_entry["duration"] = trace_entry["end"] - trace_entry["start"]
-        trace_entry["result"] = result.content[0].text
+        trace_entry["result"] = tool_output
 
-        # Add tool result to chat for possible chaining
         messages.append({
             "role": "tool",
             "tool_call_id": tool_call.id,
-            "content": result.content[0].text,
+            "content": tool_output,
         })
 
         trace_log.append(trace_entry)
 
-    # Step 4: Final GPT response (optional)
+    # Step 5: Final GPT response with tool results
     final_response = await GPT.chat.completions.create(
         model=MODEL,
         messages=messages,

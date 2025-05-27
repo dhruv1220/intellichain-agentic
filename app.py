@@ -13,11 +13,16 @@ client = MCPOpenAIClient()
 loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
 
-@app.route("/ask", methods=["POST"])
+@app.route("/tool-chaining", methods=["POST"])
 def ask():
     query = request.json.get("query", "")
-    response = loop.run_until_complete(client.process_query(query))
-    return jsonify({"response": response})
+    user_id = request.json.get("user_id", "default")
+    result = loop.run_until_complete(client.process_query(query, user_id))
+
+    return jsonify({
+        "response": result["response"],
+        "trace": result["trace"]  # contains tool_name, args, tool_response
+    })
 
 @app.route("/")
 def hello():
@@ -58,12 +63,11 @@ def analyze_image_route():
 @app.route("/multi-agent", methods=["POST"])
 def multi_agent():
     query = request.json.get("query", "")
-    user_id = request.json.get("user_id", "default")
-    result = loop.run_until_complete(client.process_query(query, user_id))
+    result = loop.run_until_complete(call_agent(query))  
 
     return jsonify({
         "response": result["response"],
-        "trace": result["trace"]  # contains tool_name, args, tool_response
+        "trace": result["trace"]
     })
 
 if __name__ == "__main__":
