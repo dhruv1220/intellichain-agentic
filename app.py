@@ -56,13 +56,14 @@ def analyze_image_route():
     return jsonify({"response": response_text})
 
 @app.route("/multi-agent", methods=["POST"])
-def multi_agent_route():
-    data = request.get_json()
-    if "query" not in data:
-        return jsonify({"error": "Missing query"}), 400
+def multi_agent():
+    query = request.json.get("query", "")
+    result = loop.run_until_complete(client.process_query(query))
 
-    result = loop.run_until_complete(call_agent(data["query"]))
-    return jsonify({"response": result})
+    return jsonify({
+        "response": result["response"],
+        "trace": result["trace"]  # contains tool_name, args, tool_response
+    })
 
 if __name__ == "__main__":
     loop.run_until_complete(client.connect_to_server("server/supply_data_server.py"))

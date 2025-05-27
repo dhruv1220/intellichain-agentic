@@ -21,12 +21,36 @@ def total_sales_by_region(region: str) -> str:
 
 # Define a tool that forecasts demand
 @mcp.tool()
-def forecast_demand(regions: list) -> dict:
-    filtered = df[df["Order Region"].isin(regions)]
-    if filtered.empty:
-        return f"No data found for regions: {regions}"
-    forecast = filtered.groupby("Order Region")["Sales"].sum().sort_values(ascending=False)
-    return forecast.round(2).to_dict()
+def forecast_demand(regions: list) -> str:
+    """Forecast demand in one or more regions.
+
+    Args:
+        regions: List of region names like 'South Asia', 'Europe', etc.
+
+    Returns:
+        A text summary of total sales per region, indicating demand levels.
+    """
+    print(f"Forecast tool called with regions: {regions}")
+    if not regions:
+        return "⚠️ No regions provided."
+
+    filtered_df = df[df['Order Region'].isin(regions)]
+    if filtered_df.empty:
+        return f"⚠️ No data found for regions: {', '.join(regions)}"
+
+    summary = (
+        filtered_df.groupby('Order Region')['Sales']
+        .sum()
+        .sort_values(ascending=False)
+        .to_frame()
+        .reset_index()
+    )
+
+    result_str = "📈 Demand Forecast Summary:\n"
+    for _, row in summary.iterrows():
+        result_str += f"- {row['Order Region']}: ${row['Sales']:.2f}\n"
+
+    return result_str
 
 
 # Run as an MCP stdio server
