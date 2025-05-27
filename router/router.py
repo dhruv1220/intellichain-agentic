@@ -15,129 +15,167 @@ GPT = AsyncAzureOpenAI(
     api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
     azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
 )
-
 MODEL = os.getenv("AZURE_OPENAI_MODEL")
+
 
 def load_agent_cards():
     cards = {}
     for fname in os.listdir("agents"):
         if fname.endswith(".json"):
-            with open(f"agents/" + fname) as f:
+            with open(f"agents/{fname}") as f:
                 card = json.load(f)
                 cards[card["name"]] = card
     return cards
 
+
+def trace_to_messages(trace):
+    msgs = []
+    for entry in trace:
+        if entry["type"] == "reasoning":
+            msgs.append({
+                "role": "assistant",
+                "content": f"[Thought] {entry['reasoning']}"
+            })
+        else:  # tool entry
+            payload = {
+                "tool": entry["tool"],
+                "args": entry["args"],
+                "result": entry["result"]
+            }
+            msgs.append({
+                "role": "assistant",
+                "content": f"[Tool] {json.dumps(payload)}"
+            })
+    return msgs
+
+
 async def call_agent(query: str):
+    # 1) Discover all tools + schemas
     agent_cards = load_agent_cards()
-    trace_log = []
     tool_to_agent = {}
-    agent_descriptions = {}
-
-    # Step 1: Discover tools and build tool-agent map
-    tools = []
+    tool_schemas = {}
     for agent in agent_cards.values():
-        agent_descriptions[agent["name"]] = agent["description"]
-        server_params = StdioServerParameters(command=agent["endpoint"], args=agent["args"])
+        params = StdioServerParameters(command=agent["endpoint"], args=agent["args"])
         async with AsyncExitStack() as stack:
-            read, write = await stack.enter_async_context(stdio_client(server_params))
+            read, write = await stack.enter_async_context(stdio_client(params))
             session = await stack.enter_async_context(ClientSession(read, write))
             await session.initialize()
-            tools_result = await session.list_tools()
-            for tool in tools_result.tools:
-                tool_to_agent[tool.name] = agent
-                tools.append({
-                    "type": "function",
-                    "function": {
-                        "name": tool.name,
-                        "description": tool.description,
-                        "parameters": tool.inputSchema,
-                    }
-                })
+            tools_list = (await session.list_tools()).tools
+            for t in tools_list:
+                tool_to_agent[t.name] = agent
+                tool_schemas[t.name] = t.inputSchema
 
-    # Step 2: System message to describe available agents and domains
-    agent_guide = "\n".join([
-        f"- {name}: {desc}" for name, desc in agent_descriptions.items()
-    ])
-    system_prompt = (
-        "You are a multi-agent AI assistant.\n"
-        "Available agents and their specialties:\n"
-        f"{agent_guide}\n\n"
-        "Use tools from the most relevant agent(s) to help answer the user's query."
-    )
-
-    # Step 3: Ask GPT to pick tools
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": query}
-    ]
-
-    initial_response = await GPT.chat.completions.create(
-        model=MODEL,
-        messages=messages,
-        tools=tools,
-        tool_choice="auto"
-    )
-
-    assistant_msg = initial_response.choices[0].message
-    messages.append(assistant_msg)
-
-    if not assistant_msg.tool_calls:
-        return {"response": assistant_msg.content, "trace": []}
-
-    # Step 4: Execute tool calls and add result back to GPT
-    for tool_call in assistant_msg.tool_calls:
-        tool_name = tool_call.function.name
-        arguments = json.loads(tool_call.function.arguments)
-
-        trace_entry = {
-            "step": len(trace_log) + 1,
-            "tool": tool_name,
-            "args": arguments, 
-            "start": time.time()
-        }
-
-        agent_card = tool_to_agent.get(tool_name)
-        if not agent_card:
-            trace_entry["error"] = f"Tool '{tool_name}' not found in any agent"
-            trace_log.append(trace_entry)
-            continue
-
-        server_params = StdioServerParameters(
-            command=agent_card["endpoint"],
-            args=agent_card["args"]
-        )
-
-        # Adding Agent Name to Trace Entry
-        trace_entry["agent"] = agent_card["name"] 
-
-        async with AsyncExitStack() as stack:
-            read, write = await stack.enter_async_context(stdio_client(server_params))
-            session = await stack.enter_async_context(ClientSession(read, write))
-            await session.initialize()
-            result = await session.call_tool(tool_name, arguments=arguments)
-
-        tool_output = result.content[0].text if result.content else "⚠️ No output"
-        trace_entry["end"] = time.time()
-        trace_entry["duration"] = trace_entry["end"] - trace_entry["start"]
-        trace_entry["result"] = tool_output
-
-        messages.append({
-            "role": "tool",
-            "tool_call_id": tool_call.id,
-            "content": tool_output,
+    # 2) Build OpenAI-compatible `tools` array
+    tools = []
+    for name, schema in tool_schemas.items():
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": f"Auto-generated for {name}",
+                "parameters": schema
+            }
         })
 
-        trace_log.append(trace_entry)
+    # 3) Build human-readable bullet list of tool signatures
+    tool_lines = []
+    for name, schema in tool_schemas.items():
+        props = schema.get("properties", {})
+        params = ", ".join(f"{p}: {props[p]['type']}" for p in props)
+        tool_lines.append(f"- {name}({params})")
+    tool_guide = "\n".join(tool_lines)
 
-    # Step 5: Final GPT response with tool results
-    final_response = await GPT.chat.completions.create(
-        model=MODEL,
-        messages=messages,
-        tools=tools,
-        tool_choice="none"
-    )
-
-    return {
-        "response": final_response.choices[0].message.content,
-        "trace": trace_log
+    # 4) System & user messages enforcing JSON-only schema
+    system_msg = {
+        "role": "system",
+        "content": (
+            "You are a multi-agent supply chain assistant.\n"
+            "Only use the tools listed below. Do not invent or assume any other tools exist.\n\n"
+            "Available tools:\n"
+            f"{tool_guide}\n\n"
+            "When responding, strictly use one of the following JSON formats:\n"
+            "1) { \"reasoning\": \"...\", \"next_tool\": \"tool_name\", \"args\": { ... } }\n"
+            "2) { \"reasoning\": \"...\", \"final_response\": \"...\" }\n\n"
+            "Do not wrap the response in markdown. Do not include anything else. Only return a valid JSON object."
+        )
     }
+    user_msg = {"role": "user", "content": query}
+
+    # 5) Trace & step counter
+    trace = []
+    step = 1
+
+    # 6) First GPT turn: pick first action
+    resp = await GPT.chat.completions.create(
+        model=MODEL,
+        messages=[system_msg, user_msg]
+    )
+    choice = json.loads(resp.choices[0].message.content)
+    trace.append({"step": step, "type": "reasoning", "reasoning": choice["reasoning"]})
+    step += 1
+
+    # 7) Loop until we see `final_response`
+    while "next_tool" in choice:
+        tool_name = choice["next_tool"]
+        args      = choice["args"]
+        agent     = tool_to_agent.get(tool_name)
+        if not agent:
+            raise ValueError(f"Unknown tool requested: {tool_name}")
+
+        # 7a) execute the tool
+        params = StdioServerParameters(command=agent["endpoint"], args=agent["args"])
+        async with AsyncExitStack() as stack:
+            read, write = await stack.enter_async_context(stdio_client(params))
+            session = await stack.enter_async_context(ClientSession(read, write))
+            await session.initialize()
+            t0 = time.time()
+            res = await session.call_tool(tool_name, arguments=args)
+            t1 = time.time()
+
+        output = res.content[0].text if res.content else ""
+
+        # 7b) log the tool call
+        trace.append({
+            "step": step,
+            "type":    "tool",
+            "agent":   agent["name"],
+            "tool":    tool_name,
+            "args":    args,
+            "result":  output,
+            "duration": round(t1 - t0, 3),
+        })
+        step += 1
+
+        # 7c) Ask GPT what to do next, feeding in the tool result
+        prompt_tool = {
+            "role": "assistant",
+            "content": f"[Tool Output] {output}"
+        }
+
+
+        prompt_reflect = {
+            "role":    "system",
+            "content": (
+                "Given the above tool result, reply with JSON in one of these forms:\n"
+                "1) { \"reasoning\": \"…\", \"next_tool\": \"tool_name\", \"args\": { … } }\n"
+                "2) { \"reasoning\": \"…\", \"final_response\": \"…\" }"
+            )
+        }
+
+        resp2 = await GPT.chat.completions.create(
+            model=MODEL,
+            messages=[
+                system_msg,
+                user_msg,
+                *trace_to_messages(trace),
+                prompt_tool,         # use assistant or user here
+                prompt_reflect
+            ]
+        )
+        choice = json.loads(resp2.choices[0].message.content)
+
+        trace.append({"step": step, "type": "reasoning", "reasoning": choice["reasoning"]})
+        step += 1
+
+    # 8) Done!
+    return {"response": choice["final_response"], "trace": trace}
