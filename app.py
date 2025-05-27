@@ -58,7 +58,8 @@ def analyze_image_route():
 @app.route("/multi-agent", methods=["POST"])
 def multi_agent():
     query = request.json.get("query", "")
-    result = loop.run_until_complete(client.process_query(query))
+    user_id = request.json.get("user_id", "default")
+    result = loop.run_until_complete(client.process_query(query, user_id))
 
     return jsonify({
         "response": result["response"],

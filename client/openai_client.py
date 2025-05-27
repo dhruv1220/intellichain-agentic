@@ -12,6 +12,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from openai import AsyncAzureOpenAI
 from openai.types.chat import ChatCompletionMessageParam
+from memory.session_memory import MemoryStore
 
 nest_asyncio.apply()
 load_dotenv()
@@ -34,6 +35,7 @@ class MCPOpenAIClient:
     def __init__(self):
         self.exit_stack = AsyncExitStack()
         self.sessions = {}  # key: server name, value: (session, tool names)
+        self.memory = MemoryStore()
 
         # Azure OpenAI configuration
         self.api_key = os.getenv("AZURE_OPENAI_API_KEY")
@@ -79,13 +81,19 @@ class MCPOpenAIClient:
                 })
         return all_tools
 
-    async def process_query(self, query: str) -> str:
+    async def process_query(self, query: str, user_id: str = "default") -> dict:
         tools = await self.get_mcp_tools()
         trace = []  # for reasoning trace
 
+        # Inject memory into prompt
+        memory_context = self.memory.get(user_id)
+        system_prompt = f"You are a helpful supply chain assistant.\n\nUser preferences:\n{json.dumps(memory_context, indent=2)}"
+
+        messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": query}]
+
         # Initial request
         response = await self.openai_client.chat.completions.create(
-            messages=[{"role": "user", "content": query}],
+            messages=messages,
             model=self.deployment,
             tools=tools,
             tool_choice="auto",
@@ -99,6 +107,15 @@ class MCPOpenAIClient:
             for tool_call in assistant_message.tool_calls:
                 tool_name = tool_call.function.name
                 tool_args = json.loads(tool_call.function.arguments)
+
+                # Fallback to memory if some arguments are missing
+                if user_id:
+                    memory_data = self.memory.get(user_id)
+                    memory_args = memory_data.get("last_tool_args", {})
+
+                    for key, value in memory_args.items():
+                        if key not in tool_args or not tool_args[key]:
+                            tool_args[key] = value
 
                 # Determine which session owns the tool
                 session = None
@@ -129,6 +146,10 @@ class MCPOpenAIClient:
                     "tool_call_id": tool_call.id,
                     "content": tool_output,
                 })
+
+                self.memory.update(user_id, "last_tool_args", tool_args)
+
+            self.memory.append_to_list(user_id, "recent_queries", query)
         
             # Final GPT response incorporating tool results
             final_response = await self.openai_client.chat.completions.create(
